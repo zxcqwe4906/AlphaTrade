@@ -1,75 +1,176 @@
-import os
-import sys
+import time
+from typing import Optional, Dict, Any, List
 
-sys.path.append(os.getcwd())
+from requests import Request, Session, Response
+import hmac
 
-from steaker_quant.client.base_client import BaseClient
-from steaker_quant.exchange.ftx import FtxExchange
+class FtxClient():
+    _ENDPOINT = 'https://ftx.com/api/'
 
-# pylint: disable=arguments-differ
-class FtxClient(BaseClient):
-    def __init__(self, api_key, api_secret, subaccount_name=None):
-        self._ftx_exchange = FtxExchange(api_key, api_secret, subaccount_name)
+    def __init__(self, api_key, api_secret, subaccount_name=None) -> None:
+        self._session = Session()
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._subaccount_name = subaccount_name
 
-    def get_balances(self, coins=None):
-        """Return balance list of dict
+    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        return self._request('GET', path, params=params)
 
-        [{'coin': USD, 'free': 10, 'total':10}, ...]
+    def _post(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        return self._request('POST', path, json=params)
+
+    def _delete(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        return self._request('DELETE', path, json=params)
+
+    def _request(self, method: str, path: str, **kwargs) -> Any:
+        time.sleep(0.1) # sleep to avoid frequrnt request
+        request = Request(method, self._ENDPOINT + path, **kwargs)
+        self._sign_request(request)
+        response = self._session.send(request.prepare())
+        return self._process_response(response)
+
+    def _sign_request(self, request: Request) -> None:
+        ts = int(time.time() * 1000)
+        prepared = request.prepare()
+        signature_payload = f'{ts}{prepared.method}{prepared.path_url}'.encode()
+        if prepared.body:
+            signature_payload += prepared.body
+        signature = hmac.new(self._api_secret.encode(), signature_payload, 'sha256').hexdigest()
+        request.headers['FTX-KEY'] = self._api_key
+        request.headers['FTX-SIGN'] = signature
+        request.headers['FTX-TS'] = str(ts)
+
+        if self._subaccount_name:
+            request.headers['FTX-SUBACCOUNT'] = self._subaccount_name
+
+    def _process_response(self, response: Response) -> Any:
+        try:
+            data = response.json()
+        except ValueError:
+            response.raise_for_status()
+            raise
+        else:
+            if not data['success']:
+                raise Exception(data['error'])
+            return data['result']
+
+    def list_futures(self) -> List[dict]:
+        return self._get('futures')
+
+    def get_orderbook(self, symbol_name: str, depth: int = 30) -> dict:
+        if '/' in symbol_name:
+            return self._get(f'markets/{symbol_name}/orderbook', {'depth': depth})
+        else:
+            return self._get(f'futures/{symbol_name}/orderbook', {'depth': depth})
+
+    def get_trades(self, future: str) -> dict:
+        return self._get(f'futures/{future}/trades')
+
+    def list_markets(self) -> List[dict]:
+        return self._get('markets')
+
+    def get_market(self, market_name: str) -> dict:
+        return self._get(f'markets/{market_name}')
+
+    def get_account_info(self) -> dict:
+        return self._get(f'account')
+
+    def get_positions(self) -> List[dict]:
+        return self._get(f'positions')
+
+    def get_open_orders(self) -> List[dict]:
+        return self._get(f'orders')
+
+    def get_order(self, order_id) -> dict:
+        return self._get(f'orders/{order_id}')
+
+    def get_orders_history(self, market) -> List[dict]:
+        return self._get(f'orders/history?market={market}')
+
+    def get_open_trigger_orders(self, market) -> List[dict]:
+        return self._get(f'conditional_orders?market={market}')
+
+    def get_trigger_orders_history(self, market) -> List[dict]:
+        return self._get(f'conditional_orders/history?market={market}')
+
+    def get_trigger_order_triggers(self, order_id) -> dict:
+        return self._get(f'conditional_orders/{order_id}/triggers')
+
+    def get_market_open_orders(self, market) -> List[dict]:
+        return self._get(f'orders', {'market': market})
+
+    def place_order(self, market: str, side: str, price: float, size: float, ioc=False, reduceOnly=False) -> dict:
+        return self._post('orders', {'market': market,
+                                     'side': side,
+                                     'price': price,
+                                     'size': size,
+                                     'ioc': ioc,
+                                     'reduceOnly': reduceOnly})
+
+    def place_stop_order(self, market: str, side: str, trigger_price: float, size: float, order_price=None, reduceOnly=False, retryUntilFilled=True):
+        return self._post('conditional_orders', {'market': market,
+                                                 'side': side,
+                                                 'triggerPrice': trigger_price,
+                                                 'orderPrice': order_price,
+                                                 'size': size,
+                                                 'type': 'stop',
+                                                 'reduceOnly': reduceOnly,
+                                                 'retryUntilFilled': retryUntilFilled})
+
+    def place_trail_order(self, market: str, side: str, trail_value: float, size: float, order_price=None, reduce_only=None):
+        if not reduce_only:
+            reduce_only = False
+        return self._post('conditional_orders', {'market': market,
+                                                 'side': side,
+                                                 'trailValue': trail_value,
+                                                 'orderPrice': order_price,
+                                                 'size': size,
+                                                 'type': 'trailingStop',
+                                                 'reduceOnly': reduce_only})
+
+    def cancel_order(self, order_id: str) -> dict:
         """
-        balances = []
-        resp_balances = self._ftx_exchange.get_balances()
-        for resp_balance in resp_balances:
-            if resp_balance['total'] != 0:
-                if not coins or resp_balance['coin'] in coins:
-                    balances.append(resp_balance)
-        return balances
-
-    def get_future_position(self, future):
-        """Return negative size if sell position
+        If success, returns 'Order queued for cancellation'.
         """
-        positions = self._ftx_exchange.get_positions()
-        for position in positions:
-            if position['future'] == future:
-                if position['side'] == 'buy':
-                    return position['size']
-                return -position['size']
-        return 0
+        return self._delete(f'orders/{order_id}')
 
-    def get_current_price(self, symbol_name):
-        market = self._ftx_exchange.get_market(symbol_name)
-        return market['price']
+    def cancel_trigger_order(self, order_id: str) -> dict:
+        return self._delete(f'conditional_orders/{order_id}')
 
-    def get_ohlcv(self, symbol_name, timeframe_type):
-        raise NotImplementedError
-
-    def get_orderbook(self, symbol_name, depth=30):
-        """Input: market or future
-            BTC-PERP, BTC/USD
+    def cancel_all_orders(self, market=None) -> dict:
         """
-        return self._ftx_exchange.get_orderbook(symbol_name, depth)
+        If success, returns 'Order queued for cancellation'.
+        """
+        return self._delete(f'orders', {'market': market})
 
-    def get_open_orders(self):
-        return self._ftx_exchange.get_open_orders()
+    def get_fills(self, market=None, limit=None, start_time=None) -> List[dict]:
+        params = {}
+        if market:
+            params['market'] = market
+        if limit:
+            params['limit'] = limit
+        if start_time:
+            params['start_time'] = start_time
+        return self._get(f'fills', params=params)
 
-    def get_order(self, order_id):
-        return self._ftx_exchange.get_order(order_id)
+    def get_balances(self) -> List[dict]:
+        return self._get('wallet/balances')
 
-    def place_limit_order(self, symbol_name, side, price, amount, ioc=False, reduceOnly=False):
-        print(f'place limit order {side} {amount} {symbol_name} at {price}, ioc: {ioc}, reduceOnly: {reduceOnly}')
-        return self._ftx_exchange.place_order(symbol_name, side, price, amount, ioc, reduceOnly)
+    def get_deposit_address(self, ticker: str) -> dict:
+        return self._get(f'wallet/deposit_address/{ticker}')
 
-    def place_market_order(self, symbol_name, side, amount, ioc=False, reduceOnly=False):
-        print(f'place market order {side} {amount} {symbol_name}, ioc: {ioc}, reduceOnly: {reduceOnly}')
-        return self._ftx_exchange.place_order(symbol_name, side, None, amount, ioc, reduceOnly)
+    def get_future(self, future_name: str) -> dict:
+        return self._get(f'futures/{future_name}')
 
-    def cancel_order(self, order_id):
-        return self._ftx_exchange.cancel_order(order_id)
+    def get_future_stats(self, future: str) -> dict:
+        return self._get(f'futures/{future}/stats')
 
-    def get_funding_rates(self, future, start_time=None, end_time=None):
-        return self._ftx_exchange.get_funding_rates(future, start_time, end_time)
-
-    def list_futures(self):
-        return self._ftx_exchange.list_futures()
-
-    def get_future_states(self, future):
-        return self._ftx_exchange.get_future_stats(future)
+    def get_funding_rates(self, future=None, start_time=None, end_time=None):
+        params = {}
+        if future:
+            params['future'] = future
+        if start_time:
+            params['start_time'] = start_time
+        if end_time:
+            params['end_time'] = end_time
+        return self._get(f'funding_rates', params=params)
