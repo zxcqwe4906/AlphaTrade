@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, List
 from requests import Request, Session, Response
 import hmac
 
-class FtxClient():
+class FtxExchange():
     _ENDPOINT = 'https://ftx.com/api/'
 
     def __init__(self, api_key, api_secret, subaccount_name=None) -> None:
@@ -174,3 +174,15 @@ class FtxClient():
         if end_time:
             params['end_time'] = end_time
         return self._get(f'funding_rates', params=params)
+
+    def get_historical_prices(self, market_name, resolution, limit=None, start_time=None, end_time=None):
+        """Resolution: window length in seconds
+        """
+        params = {'resolution': resolution}
+        if limit:
+            params['limit'] = limit
+        if start_time:
+            params['start_time'] = start_time
+        if end_time:
+            params['end_time'] = end_time
+        return self._get(f'markets/{market_name}/candles', params=params)
