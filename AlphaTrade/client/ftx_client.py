@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, List
 from requests import Request, Session, Response
 import hmac
 
-class FtxExchange():
+class FtxClient():
     _ENDPOINT = 'https://ftx.com/api/'
 
     def __init__(self, api_key, api_secret, subaccount_name=None) -> None:
